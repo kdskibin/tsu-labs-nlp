@@ -16,7 +16,7 @@ FORBIDDEN_GRAMMEMES = frozenset({"Abbr", "Fixd", "Init"})
 # Собственные имена: разбор принимается только для слова с заглавной буквы, иначе "машин" (от "Маша") конкурирует с притяжательным прилагательным.
 PROPER_GRAMMEMES = frozenset({"Surn", "Name", "Patr", "Geox"})
 
-# Падежи, которые не являются настоящими падежами: звательный (voct) и прочие словарные "падежи" OpenCorpora, для согласования не годятся.
+# Падежи, которые не являются настоящими падежами: звательный (voct) и прочие словарные "падежи" OpenCorpora, не годятся.
 NON_AGREEMENT_CASES = frozenset({None, "voct"})
 
 # Вторичные падежи - варианты основных, а не отдельные падежи. Если их не нормализовать, теряются корректные пары.
@@ -32,12 +32,11 @@ def normalize_case(case: str | None) -> str | None:
     return SECONDARY_CASES.get(case, case)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Token:
     """
     Словоформа с одним допустимым морфологическим разбором.
     """
-
     word: str
     lemma: str
     pos: str
@@ -56,12 +55,11 @@ class Token:
         return ",".join(parts)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Pair:
     """
     Найденная пара: исходные словоформы и результат в виде лемм.
     """
-
     first: Token
     second: Token
 
@@ -74,7 +72,7 @@ class Pair:
         return self.first.word, self.second.word
 
     @property
-    def combo(self) -> str:
+    def both_pos(self) -> str:
         return f"{self.first.pos}+{self.second.pos}"
 
     def render(self, verbose: bool = False) -> str:
@@ -82,8 +80,8 @@ class Pair:
         if not verbose:
             return lemma_pair
         word_pair = " ".join(self.words)
-        detail = f"[{self.combo}] {self.first.describe()} | {self.second.describe()}"
-        return f"{lemma_pair:<34} <- {word_pair:<28} {detail}"
+        detail = f"[{self.both_pos}] {self.first.describe()} | {self.second.describe()}"
+        return f"{word_pair:<28} -> {lemma_pair:<28} {detail}"
 
 
 def candidate_tokens(word: str, morph: pymorphy3.MorphAnalyzer) -> list[Token]:
@@ -93,7 +91,7 @@ def candidate_tokens(word: str, morph: pymorphy3.MorphAnalyzer) -> list[Token]:
     Берем все разборы, потому что pymorphy3 не учитывает контекст.
     """
     is_capitalized = word[:1].isupper()
-    result: list[Token] = []
+    result = []
 
     for parsed in morph.parse(word):
         tag = parsed.tag
@@ -106,16 +104,13 @@ def candidate_tokens(word: str, morph: pymorphy3.MorphAnalyzer) -> list[Token]:
         if (grammemes & PROPER_GRAMMEMES) and not is_capitalized:
             continue
 
-        result.append(
-            Token(
-                word=word,
-                lemma=parsed.normal_form,
-                pos=tag.POS,
-                gender=getattr(tag, "gender", None),
-                number=getattr(tag, "number", None),
-                case=normalize_case(getattr(tag, "case", None)),
-            )
-        )
+        result.append(Token(
+            word=word,
+            lemma=parsed.normal_form,
+            pos=tag.POS,
+            gender=getattr(tag, "gender", None),
+            number=getattr(tag, "number", None),
+            case=normalize_case(getattr(tag, "case", None))))
 
     return result
 
@@ -151,29 +146,19 @@ def ensure_nltk_data() -> None:
     """
     Догрузить модели NLTK при первом запуске.
     """
-    for resource, package in (
-        ("tokenizers/punkt", "punkt"),
-        ("tokenizers/punkt_tab", "punkt_tab"),
-    ):
+    for resource, package in (("tokenizers/punkt", "punkt"), ("tokenizers/punkt_tab", "punkt_tab")):
         try:
             nltk.data.find(resource)
         except LookupError:
             nltk.download(package, quiet=True)
 
 
-def split_sentences(text: str) -> list[str]:
-    """
-    Сегментация текста на предложения.
-    """
-    return sent_tokenize(text)
-
-
 def token_spans(sentence: str) -> list[list[str]]:
     """
     Группы подряд идущих слов, не разделенных пунктуацией.
     """
-    groups: list[list[str]] = []
-    current: list[str] = []
+    groups = []
+    current = []
 
     for token in word_tokenize(sentence):
         if any(char.isalpha() for char in token):
@@ -191,15 +176,15 @@ def find_pairs(text: str, morph: pymorphy3.MorphAnalyzer) -> list[Pair]:
     """
     Все пары согласованных существительных/прилагательных в тексте.
     """
-    pairs: list[Pair] = []
+    pairs = []
 
-    for sentence in split_sentences(text):
+    for sentence in sent_tokenize(text):
         for group in token_spans(sentence):
             analyses = [candidate_tokens(word, morph) for word in group]
 
             for index in range(len(group) - 1):
                 # Дедупликация по паре лемм: падежная омонимия дает один и тот же результат дважды.
-                seen: set[tuple[str, str]] = set()
+                seen= set()
 
                 for first in analyses[index]:
                     for second in analyses[index + 1]:
@@ -218,7 +203,7 @@ def unique_lemma_pairs(pairs: list[Pair]) -> list[tuple[str, str]]:
     """
     Уникальные пары лемм в порядке первого появления.
     """
-    unique: list[tuple[str, str]] = []
+    unique = []
     for pair in pairs:
         if pair.lemmas not in unique:
             unique.append(pair.lemmas)
@@ -232,10 +217,7 @@ def read_text(path: Path) -> str:
 def main(argv: list[str] | None = None) -> int:
     default_input = Path(__file__).with_name("text.txt")
 
-    parser = argparse.ArgumentParser(
-        description="Пары соседних существительных/прилагательных, "
-        "согласованных по роду, числу и падежу (вывод в виде лемм)."
-    )
+    parser = argparse.ArgumentParser(description="Пары соседних существительных/прилагательных, согласованных по роду, числу и падежу (вывод в виде лемм).")
     parser.add_argument(
         "--input",
         type=Path,
@@ -247,8 +229,8 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="показать исходные словоформы и грамматические признаки",
     )
-    args = parser.parse_args(argv)
 
+    args = parser.parse_args(argv)
     try:
         text = read_text(args.input)
     except OSError as error:
